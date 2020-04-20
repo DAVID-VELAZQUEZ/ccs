@@ -81,8 +81,8 @@ and final output consensus:
       --min-rq       FLOAT  Minimum predicted accuracy in [0, 1]. [0.99]
 
 Data flow how each ZMW gets processed and filtered:
-1. Remove subreads with lengths <50% or >200% of the median subread length.
-2. Remove subreads with SNR below `--min-snr`.
+1. Remove subreads with SNR below `--min-snr`.
+2. Remove subreads with lengths <50% or >200% of the median subread length.
 3. Stop if number of full-length subreads is fewer than `--min-passes`.
 4. Generate draft sequence and stop if draft length does not pass `--min-length` and `--max-length`.
 5. Polish consensus sequence and only emit read if predicted accuracy is at least `--min-rq`.
@@ -96,26 +96,28 @@ Subreads that are longer than 200% the median length are likely due to missed
 adapter calls, where the initial polymerase read was wrongly split into subreads.
 
 ### How do I read the ccs_report.txt file?
-The `ccs_report.txt` file summarizes (B) how many ZMWs generated HiFi reads (CCS) and
+Per default, each CCS run generates a `outputPrefix.ccs_report.txt` file.
+This file summarizes (B) how many ZMWs generated HiFi reads (CCS) and
 (C) how many failed CCS generation because of the listed causes. For (C), each ZMW
 contributes to exactly one reason of failure; percentages are with respect to (C).
 
 The following comments refer to the filters that are explained in the FAQ above.
 
-    ZMWs input          (A)  : 44327
-    ZMWs generating CCS (B)  : 16304 (36.78%)
-    ZMWs filtered       (C)  : 28023 (63.22%)
+    ZMWs input           (A) : 44327
+    ZMWs passing filters (B) : 16304 (36.78%)
+    ZMWs failing filters (C) : 28023 (63.22%)
 
     Exclusive ZMW counts for (C):
-    Median length filter     : 0 (0.00%)      <- All subreads were filtered in (1)
-    Below SNR threshold      : 574 (2.05%)    <- All subreads were filtered in (2)
+    Below SNR threshold      : 574 (2.05%)    <- All subreads were filtered in (1)
+    Median length filter     : 0 (0.00%)      <- All subreads were filtered in (2)
     Lacking full passes      : 24706 (88.16%) <- Fewer than --min-passes full-length (FL) reads (3)
+    2-passes shortcut        : 0 (0.00%)      <- Low-pass ZMWs skipped by --all
     Heteroduplex insertions  : 422 (1.51%)    <- Single-strand artifacts
     Coverage drops           : 29 (0.10%)     <- Coverage drops would lead to unreliable polishing results
     Insufficient draft cov   : 282 (1.01%)    <- Not enough subreads aligned to draft end-to-end
     Draft too different      : 0 (0.00%)      <- Fewer than --min-passes FL reads aligned to draft
     Draft generation error   : 94 (0.34%)     <- Subreads don't agree to generate a draft sequence
-    Draft above --max-length : 21 (0.07%)     <- Draft sequence is longer than --min-length (4)
+    Draft above --max-length : 21 (0.07%)     <- Draft sequence is longer than --max-length (4)
     Draft below --min-length : 0 (0.00%)      <- Draft sequence is shorter than --min-length (4)
     Reads failed polishing   : 0 (0.00%)      <- Too many subreads were dropped while polishing
     Empty coverage windows   : 0 (0.00%)      <- At least one window has no coverage
@@ -133,7 +135,108 @@ matching `G`. _ccs_ would polish this to one of the bases and reflect the
 ambiguity in the base QV. In our case, when one strand has more than `20`
 additional bases that the other strand does not have, _ccs_ won't be able to
 converge to a consensus sequence, and consequently will remove the ZMW and
-increase the counter for heteroduplexes found in the `ccs_report.txt` file.
+increase the counter for heteroduplexes found in the `*.ccs_report.txt` file.
+
+### How does `--all` work?
+Using _ccs_ with the special option `--all`, it generates one representative
+sequence per ZMW, irrespective of quality and passes.
+For this, `--min-passes 0 --min-rq 0` are set implicitly and can't be changed.
+Filtering has to be performed downstream.
+
+The workflow of _ccs_ with `--all` changes as following.
+
+**Draft:**
+There is special behavior for low-pass ZMWs. If a ZMW has 2 or fewer full-length
+subreads, use the subread of median length as representative consensus.
+
+**Polish:**
+Only polish ZMWs with at least one full-length subread and one additional partial subread.
+Otherwise, set predicted accuracy `rq` tag to `-1` to indicate that the predicted
+accuracy was not calculated and populate per-base QVs with `+` (QV10) the
+approximate raw accuracy.
+
+#### How is `--all` different from explicitly setting `--min-passes 0 --min-rq 0`?
+Setting `--min-passes 0 --min-rq 0` is the brute force combination that will
+polish every ZMW, even those that only have one partial subread, though
+polishing makes no difference.
+In contrast, `--all` is a bit smarter and will only polish ZMWs with at
+least one full-length subread and one additional partial subread; please see
+previous paragraph how skipped ZMWs are represented in the output.
+
+### How do I read the zmw_metrics.json file?
+Per default, each _ccs_ run generates a `outputPrefix.zmw_metrics.json.gz` file.
+Change file name with `--metrics-json`.
+You can decompress this bgzip file using `gunzip`.
+The resulting `*.zmw_metrics.json` file has one field `zmws` that contains an
+array. Each entry in this array describes one input ZMW. You can pretty print
+its content with
+
+    cat out.zmw_metrics.json | python3 -m json.tool
+
+Example content with two ZMWs:
+
+```json
+{
+  "zmws": [
+    {
+      "effective_coverage": 8.2,
+      "insert_size": 12972,
+      "num_full_passes": 7,
+      "polymerase_length": 111325,
+      "predicted_accuracy": 0.998,
+      "status": "SUCCESS",
+      "wall_end": 5529991,
+      "wall_start": 91,
+      "zmw": "m64011_200315_001815/0"
+    },
+    {
+      "effective_coverage": 1,
+      "insert_size": 12783,
+      "num_full_passes": 1,
+      "polymerase_length": 27511,
+      "predicted_accuracy": -1.0,
+      "status": "TOO_FEW_PASSES",
+      "wall_end": 2425263,
+      "wall_start": 1179648,
+      "zmw": "m64011_200315_001815/2"
+    },
+  ]
+}
+```
+
+Each ZMW consists of following fields:
+
+  * `status`, did CCS finish with `SUCCESS` or failed with an error (identical order as in `ccs_reports.txt`):
+    * `POOR_SNR`, All subreads were below SNR threshold `--min-snr` (1)
+    * `NO_SUBREADS`, All subreads were filtered by the median length filter (2)
+    * `TOO_FEW_PASSES`, Fewer than `--min-passes` full-length (FL) reads (3)
+    * `LOW_PASS_SHORTCUT`, ZNW skipped polishing, active with [`--all`](#how-does---all-work)
+    * `HETERODUPLEXES`, Single-strand artifacts, see definition of a [heteroduplex](#what-is-the-definition-of-a-heteroduplex)
+    * `COVERAGE_DROPS`, Coverage drops against draft would lead to unreliable polishing results
+    * `INSUFFICIENT_SPANS`, Not enough subreads aligned to draft end-to-end
+    * `TOO_FEW_PASSES_AFTER_DRAFT_ALIGNMENT`, Fewer than `--min-passes` FL reads aligned to draft
+    * `DRAFT_FAILURE`, Subreads don't agree to generate a draft sequence
+    * `TOO_LONG`, Draft sequence is longer than `--max-length` (4)
+    * `TOO_SHORT`,  Draft sequence is shorter than `--min-length` (4)
+    * `TOO_MANY_UNUSABLE`, Too many subreads were dropped while polishing
+    * `EMPTY_WINDOW_DURING_POLISHING`, At least one window has no coverage
+    * `NON_CONVERGENT`, Draft has too many errors that can't be polished in time
+    * `POOR_QUALITY`, Predicted accuracy is below --min-rq (5)
+    * `EXCEPTION_THROWN`, Rare implementation errors
+  * `effective_coverage`, average coverage used for polishing, more info [here](#how-is-number-of-passes-computed)
+  * `insert_size`, the length of
+    * the polished sequence if polishing was successful or
+    * the draft sequence if draft generation was successful or
+    * the subread of median length
+  * `num_full_passes`, number of full-length subreads used, more info [here](#how-is-number-of-passes-computed)
+  * `polymerase_length`, total number of bases produced from a ZMW after trimming the low-quality regions, may incl adapters
+  * `predicted_accuracy`, also known as read quality, set to `-1` if not calculated
+  * `wall_end`, start of last base of the polymerase read in approximate raw frame count since start of movie
+  * `wall_start`, start of first base of the polymerase read in approximate raw frame count since start of movie
+  * `zmw`, the ZMW ID
+
+Additional fields starting with `_` are implementation details, subject to change,
+and won't be described further.
 
 ### How can I parallelize on multiple servers?
 You can parallelize by chunking. Since _ccs_ v4.0.0, direct chunking via `--chunk`
@@ -370,7 +473,13 @@ machine-readable work that uses glibc in object code.
 
 ## Changelog
 
- * 4.2.0:
+ * 5.0.0 **FUTURE RELEASE**:
+   * Add `--all` to generate one representative read per ZMW
+   * Reuse prefix of output file for report files to avoid unintentional clobbering
+   * Add `zmw_metrics.json`, metrics about each ZMW; file name can be set with `--metrics-json`
+   * Add JSON output of ccs_reports via `--report-json`
+   * Explicit simple repeat polishing up to size N, `--repeat-length N`
+ * 4.2.0 **LATEST PUBLIC RELEASE**:
    * SMRT Link v9.0 release
    * Speed improvements
    * Minor yield improvements, by requiring a percentage of subreads mapping back to draft instead of `--min-passes`
